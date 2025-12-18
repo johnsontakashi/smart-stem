@@ -1,0 +1,519 @@
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Book, Lightbulb, Users, Brain, CheckCircle, UserPlus, Clock, BarChart3, Lock, Edit, Save, X, ChevronRight, BookOpen, FileText, GraduationCap } from "lucide-react";
+import { useAuth } from '@/contexts/AuthContext';
+import { useSubjects, useUpdateSubject, Subject, Chapter } from '@/hooks/useSubjects';
+import api from '@/lib/axios';
+import { toast } from 'sonner';
+
+const categoryInfo = {
+  core_eee: {
+    label: "Core EEE Subjects",
+    icon: Book,
+    color: "bg-blue-500",
+    description: "Fundamental electrical and electronics engineering subjects"
+  },
+  supporting: {
+    label: "Supporting Subjects",
+    icon: Lightbulb,
+    color: "bg-green-500",
+    description: "Mathematics, simulation tools, and advanced topics"
+  },
+  secondary_soft_skills: {
+    label: "Secondary & Soft Skills",
+    icon: Users,
+    color: "bg-purple-500",
+    description: "Professional development and communication skills"
+  }
+};
+
+export default function Subjects() {
+  const { t, i18n } = useTranslation();
+  const [activeCategory, setActiveCategory] = useState<string>('core_eee');
+  const [enrolledCourses, setEnrolledCourses] = useState<Set<number>>(new Set());
+  const [enrollingCourses, setEnrollingCourses] = useState<Set<number>>(new Set());
+  const [completedChapters, setCompletedChapters] = useState<Set<number>>(new Set());
+  const [editingSubject, setEditingSubject] = useState<number | null>(null);
+  const [editName, setEditName] = useState('');
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const { user } = useAuth();
+  const navigate = useNavigate();
+
+  // Use cached query - instant load on subsequent visits, filtered by current language
+  const { data, isLoading, error } = useSubjects(i18n.language);
+  const updateSubjectMutation = useUpdateSubject();
+
+  // Fetch user's enrollments and chapter completion status
+  useEffect(() => {
+    if (user?.role === 'student') {
+      fetchEnrollments();
+      fetchChapterCompletions();
+    }
+  }, [user]);
+
+  const fetchEnrollments = async () => {
+    try {
+      const response = await api.get('/enrollments/my-enrollments');
+      const subjectIds = new Set(response.data.map((e: { subject_id: number }) => e.subject_id));
+      setEnrolledCourses(subjectIds);
+    } catch (error) {
+      console.error('Error fetching enrollments:', error);
+    }
+  };
+
+  const fetchChapterCompletions = async () => {
+    try {
+      // Fetch user's quiz attempts and completion status
+      console.log('Fetching chapter completions...');
+      const response = await api.get('/quizzes/my-attempts');
+      console.log('Quiz attempts response:', response.data);
+      
+      const completedChapterIds = new Set(
+        response.data
+          .filter((attempt: { is_completed: boolean; passed: boolean }) => attempt.is_completed && attempt.passed)
+          .map((attempt: { chapter_id: number }) => attempt.chapter_id)
+      );
+      console.log('Completed chapter IDs:', Array.from(completedChapterIds));
+      setCompletedChapters(completedChapterIds);
+    } catch (error) {
+      console.error('Error fetching chapter completions:', error);
+      // For testing, let's simulate that no chapters are completed
+      console.log('Setting empty completed chapters set for testing');
+      setCompletedChapters(new Set());
+    }
+  };
+
+  const handleEnroll = async (subjectId: number, subjectName: string) => {
+    setEnrollingCourses(prev => new Set(prev).add(subjectId));
+
+    try {
+      await api.post('/enrollments/', { subject_id: subjectId });
+      setEnrolledCourses(prev => new Set(prev).add(subjectId));
+      toast.success(t('subjects.enrollSuccess', { name: subjectName }));
+    } catch (error: unknown) {
+      console.error('Error enrolling:', error);
+      const apiError = error as { response?: { data?: { detail?: string } } };
+      toast.error(apiError.response?.data?.detail || t('subjects.enrollFailed'));
+    } finally {
+      setEnrollingCourses(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(subjectId);
+        return newSet;
+      });
+    }
+  };
+
+  const getSubjectsByCategory = (category: string) => {
+    if (!data) return [];
+    return data.subjects.filter((subject: Subject) => subject.category === category);
+  };
+
+  const isChapterLocked = (chapter: Chapter, subjectChapters: Chapter[]) => {
+    if (!user || user.role !== 'student') {
+      console.log('Not a student user, chapter not locked');
+      return false;
+    }
+    
+    // Sort chapters by order to check prerequisites
+    const sortedChapters = [...subjectChapters].sort((a, b) => a.order - b.order);
+    const currentIndex = sortedChapters.findIndex(c => c.id === chapter.id);
+    
+    console.log(`Checking chapter ${chapter.name} (order: ${chapter.order}, index: ${currentIndex})`);
+    
+    // First chapter is never locked
+    if (currentIndex === 0) {
+      console.log('First chapter, not locked');
+      return false;
+    }
+    
+    // Check if previous chapter is completed
+    const previousChapter = sortedChapters[currentIndex - 1];
+    const isLocked = !completedChapters.has(previousChapter.id);
+    console.log(`Previous chapter ${previousChapter.name} completed: ${completedChapters.has(previousChapter.id)}, current chapter locked: ${isLocked}`);
+    console.log('Completed chapters:', Array.from(completedChapters));
+    
+    return isLocked;
+  };
+
+  const handleChapterAccess = (chapterId: number, chapter: Chapter, subjectChapters: Chapter[]) => {
+    // Only apply locking logic to students
+    if (user?.role === 'student') {
+      const locked = isChapterLocked(chapter, subjectChapters);
+      
+      if (locked) {
+        toast.error(t('subjects.chapterLocked') || 'Complete previous chapter first');
+        return;
+      }
+    }
+    
+    // Navigate to comprehensive chapter resources page
+    navigate(`/chapter/${chapterId}/resources`);
+  };
+
+  const handleQuickQuizAccess = (event: React.MouseEvent, chapterId: number, chapter: Chapter, subjectChapters: Chapter[]) => {
+    event.stopPropagation(); // Prevent triggering the chapter resource navigation
+    
+    const locked = isChapterLocked(chapter, subjectChapters);
+    
+    if (locked) {
+      toast.error(t('subjects.chapterLocked') || 'Complete previous chapter first');
+      return;
+    }
+    
+    navigate(`/quiz/${chapterId}`);
+  };
+
+  const startEditingSubject = (subject: Subject) => {
+    setEditingSubject(subject.id);
+    setEditName(subject.name);
+    setIsEditDialogOpen(true);
+  };
+
+  const handleSaveSubjectName = async () => {
+    if (!editingSubject || !editName.trim()) {
+      toast.error('Subject name cannot be empty');
+      return;
+    }
+
+    if (editName.trim().length < 3) {
+      toast.error('Subject name must be at least 3 characters');
+      return;
+    }
+
+    try {
+      await updateSubjectMutation.mutateAsync({
+        subjectId: editingSubject,
+        name: editName.trim()
+      });
+      
+      toast.success('Subject name updated successfully');
+      setIsEditDialogOpen(false);
+      setEditingSubject(null);
+      setEditName('');
+    } catch (error: unknown) {
+      const apiError = error as { response?: { data?: { detail?: string } } };
+      const errorMessage = apiError.response?.data?.detail || 'Failed to update subject name';
+      toast.error(errorMessage);
+    }
+  };
+
+  const cancelEditing = () => {
+    setIsEditDialogOpen(false);
+    setEditingSubject(null);
+    setEditName('');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+          <p>{t('subjects.loading')}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-destructive mb-4">{t('subjects.errorLoading')}</p>
+          <Button onClick={() => window.location.reload()}>{t('common.back')}</Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mx-auto py-8 px-4">
+      <div className="mb-8">
+        <h1 className="text-4xl font-bold mb-2">{t('subjects.title')}</h1>
+        <p className="text-muted-foreground">
+          {t('subjects.description')}
+        </p>
+      </div>
+
+      <Tabs value={activeCategory} onValueChange={setActiveCategory} className="w-full">
+        <TabsList className="grid w-full grid-cols-3 mb-8">
+          {Object.entries(categoryInfo).map(([key, info]) => {
+            const Icon = info.icon;
+            return (
+              <TabsTrigger key={key} value={key} className="flex items-center gap-2">
+                <Icon className="h-4 w-4" />
+                <span className="hidden sm:inline">{info.label}</span>
+                <span className="sm:hidden">{info.label.split(' ')[0]}</span>
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+
+        {Object.entries(categoryInfo).map(([category, info]) => {
+          const Icon = info.icon;
+          const categorySubjects = getSubjectsByCategory(category);
+
+          return (
+            <TabsContent key={category} value={category} className="space-y-6">
+              <Card className={`border-l-4 ${info.color.replace('bg-', 'border-l-')}`}>
+                <CardHeader>
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${info.color} text-white`}>
+                      <Icon className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <CardTitle>{info.label}</CardTitle>
+                      <CardDescription>{info.description}</CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+              </Card>
+
+              <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+                {categorySubjects.map((subject) => {
+                  // Use subject ID for enrollment
+                  const isEnrolled = enrolledCourses.has(subject.id);
+                  const isEnrolling = enrollingCourses.has(subject.id);
+
+                  return (
+                    <Card key={subject.id} className="hover:shadow-lg transition-shadow">
+                      <CardHeader>
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-2xl">{subject.icon}</span>
+                            <div>
+                              <CardTitle className="text-lg">{subject.name}</CardTitle>
+                              <Badge variant="outline" className="mt-1">{subject.code}</Badge>
+                            </div>
+                          </div>
+                          {(user?.role === 'admin' || user?.role === 'teacher') && (
+                            <Dialog open={isEditDialogOpen && editingSubject === subject.id} onOpenChange={(open) => {
+                              if (!open) cancelEditing();
+                            }}>
+                              <DialogTrigger asChild>
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm"
+                                  onClick={() => startEditingSubject(subject)}
+                                  className="h-8 w-8 p-0"
+                                >
+                                  <Edit className="h-4 w-4" />
+                                </Button>
+                              </DialogTrigger>
+                              <DialogContent>
+                                <DialogHeader>
+                                  <DialogTitle>Edit Subject Name</DialogTitle>
+                                  <DialogDescription>
+                                    Change the subject name. Example: "Circuit Theory" instead of "Circuit Analysis 101"
+                                  </DialogDescription>
+                                </DialogHeader>
+                                <div className="py-4">
+                                  <Input
+                                    value={editName}
+                                    onChange={(e) => setEditName(e.target.value)}
+                                    placeholder="Enter subject name"
+                                    className="w-full"
+                                    maxLength={100}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        handleSaveSubjectName();
+                                      }
+                                    }}
+                                  />
+                                </div>
+                                <DialogFooter>
+                                  <Button variant="outline" onClick={cancelEditing}>
+                                    <X className="h-4 w-4 mr-2" />
+                                    Cancel
+                                  </Button>
+                                  <Button 
+                                    onClick={handleSaveSubjectName}
+                                    disabled={updateSubjectMutation.isPending}
+                                  >
+                                    {updateSubjectMutation.isPending ? (
+                                      <>
+                                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                                        Saving...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Save className="h-4 w-4 mr-2" />
+                                        Save
+                                      </>
+                                    )}
+                                  </Button>
+                                </DialogFooter>
+                              </DialogContent>
+                            </Dialog>
+                          )}
+                        </div>
+                        <CardDescription className="mt-2">{subject.description}</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {/* Student Enrollment Button */}
+                        {user?.role === 'student' && (
+                          <div className="mb-4">
+                            {isEnrolled ? (
+                              <Badge variant="default" className="w-full justify-center py-2">
+                                <CheckCircle className="h-4 w-4 mr-2" />
+                                {t('subjects.enrolled')}
+                              </Badge>
+                            ) : (
+                              <Button
+                                onClick={() => handleEnroll(subject.id, subject.name)}
+                                disabled={isEnrolling}
+                                variant="outline"
+                                className="w-full"
+                              >
+                                {isEnrolling ? (
+                                  <>
+                                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary mr-2"></div>
+                                    {t('subjects.enrolling')}
+                                  </>
+                                ) : (
+                                  <>
+                                    <UserPlus className="h-4 w-4 mr-2" />
+                                    {t('subjects.enrollCourse')}
+                                  </>
+                                )}
+                              </Button>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <h4 className="font-semibold text-sm text-muted-foreground mb-3">
+                            {t('subjects.chapters')} ({subject.chapters.length})
+                          </h4>
+                          <div className="space-y-2">
+                            {subject.chapters.map((chapter) => {
+                              // Only apply locking to students
+                              const locked = user?.role === 'student' ? isChapterLocked(chapter, subject.chapters) : false;
+                              const completed = completedChapters.has(chapter.id);
+                              
+                              // TEMPORARY: Force lock chapters 2+ for testing (students only)
+                              const forceLocked = user?.role === 'student' && chapter.order > 1;
+                              
+                              // Debug logging for UI rendering
+                              console.log(`Rendering chapter ${chapter.name}: locked=${locked}, forceLocked=${forceLocked}, completed=${completed}`);
+                              
+                              return (
+                                <div
+                                  key={chapter.id}
+                                  onClick={() => handleChapterAccess(chapter.id, chapter, subject.chapters)}
+                                  className={`flex items-start justify-between gap-3 p-3 rounded-lg border transition-all group cursor-pointer ${
+                                    (locked || forceLocked) 
+                                      ? 'bg-muted/20 border-muted opacity-70' 
+                                      : 'hover:bg-accent hover:border-accent-foreground/20 border-transparent hover:shadow-sm'
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-2 flex-1">
+                                    <div className="flex items-center gap-1 mt-0.5">
+                                      <Badge variant="secondary" className="shrink-0">
+                                        {chapter.order}
+                                      </Badge>
+                                      {(locked || forceLocked) && (
+                                        <Lock className="h-3 w-3 text-muted-foreground" />
+                                      )}
+                                      {completed && (
+                                        <CheckCircle className="h-3 w-3 text-green-500" />
+                                      )}
+                                    </div>
+                                    <div className="flex-1">
+                                      <p className={`text-sm font-medium leading-relaxed ${(locked || forceLocked) ? 'text-muted-foreground' : ''}`}>
+                                        {chapter.name}
+                                      </p>
+                                      {(locked || forceLocked) && (
+                                        <p className="text-xs text-muted-foreground/80 mt-1 italic">
+                                          Complete previous chapter first
+                                        </p>
+                                      )}
+                                      <div className="flex items-center gap-2 mt-1">
+                                        {chapter.difficulty_level && (
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-xs ${
+                                              chapter.difficulty_level === 'beginner' ? 'border-green-500 text-green-600' :
+                                              chapter.difficulty_level === 'intermediate' ? 'border-yellow-500 text-yellow-600' :
+                                              'border-red-500 text-red-600'
+                                            }`}
+                                          >
+                                            <BarChart3 className="h-3 w-3 mr-1" />
+                                            {chapter.difficulty_level === 'beginner' ? t('subjects.beginner') || 'Beginner' :
+                                             chapter.difficulty_level === 'intermediate' ? t('subjects.intermediate') || 'Intermediate' :
+                                             t('subjects.advanced') || 'Advanced'}
+                                          </Badge>
+                                        )}
+                                        {chapter.estimated_minutes && (
+                                          <Badge variant="outline" className="text-xs text-muted-foreground">
+                                            <Clock className="h-3 w-3 mr-1" />
+                                            {chapter.estimated_minutes} {t('subjects.minutes') || 'min'}
+                                          </Badge>
+                                        )}
+                                      </div>
+                                      {/* Resource indicators */}
+                                      {!(locked || forceLocked) && (
+                                        <div className="flex items-center gap-1 mt-2 opacity-70 group-hover:opacity-100 transition-opacity">
+                                          <BookOpen className="h-3 w-3 text-blue-500" title="Lessons" />
+                                          <Brain className="h-3 w-3 text-purple-500" title="Quizzes" />
+                                          <FileText className="h-3 w-3 text-green-500" title="Assignments" />
+                                          <GraduationCap className="h-3 w-3 text-red-500" title="Exams" />
+                                          <span className="text-xs text-muted-foreground ml-1">View all resources</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {/* Quick Quiz Button - Only for enrolled students */}
+                                    {user?.role === 'student' && isEnrolled && !(locked || forceLocked) && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={(e) => handleQuickQuizAccess(e, chapter.id, chapter, subject.chapters)}
+                                        className="h-8 px-2 text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                                      >
+                                        <Brain className="h-3 w-3 mr-1" />
+                                        Quiz
+                                      </Button>
+                                    )}
+                                    
+                                    {/* Main Resources Button - Available to all users, but with restrictions */}
+                                    <div className="flex items-center gap-1">
+                                      {(locked || forceLocked) ? (
+                                        <Lock className="h-4 w-4 text-muted-foreground" />
+                                      ) : (
+                                        <ChevronRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+
+              {categorySubjects.length === 0 && (
+                <Card>
+                  <CardContent className="text-center py-12">
+                    <p className="text-muted-foreground">{t('subjects.noSubjects')}</p>
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
+          );
+        })}
+      </Tabs>
+    </div>
+  );
+}
